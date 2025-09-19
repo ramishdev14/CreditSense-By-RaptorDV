@@ -1,12 +1,42 @@
-import snowflake.connector
-import requests
 import os
+import json
+import requests
+import snowflake.connector
 from dotenv import load_dotenv
 
-# Load env vars
+# Load environment variables
 load_dotenv("variables.env")
 
-# Snowflake connection
+# -------------------------------
+# Summarizer Function
+# -------------------------------
+def summarize_check(table_name, column_name, check_type, check_details_str):
+    """
+    Convert raw profiling JSON into a clean English summary for the LLM.
+    """
+    try:
+        details = json.loads(check_details_str)
+    except Exception:
+        return f"Issue detected in {table_name}.{column_name}: {check_details_str}"
+
+    if check_type == "anomaly_check":
+        desc = details.get("description", "Anomaly detected")
+        results = details.get("results", [{}])[0]
+        parts = []
+        if "MIN_VAL" in results and "MAX_VAL" in results:
+            parts.append(f"Min={results['MIN_VAL']}, Max={results['MAX_VAL']}")
+        if "AVG_VAL" in results:
+            parts.append(f"Avg={results['AVG_VAL']:.2f}")
+        if "MISSING_COUNT" in results:
+            parts.append(f"Missing={results['MISSING_COUNT']}")
+        stats = ", ".join(parts)
+        return f"{desc}. Stats: {stats}"
+
+    return details.get("description", f"Check issue in {table_name}.{column_name}")
+
+# -------------------------------
+# Snowflake Connection
+# -------------------------------
 conn = snowflake.connector.connect(
     user=os.getenv("SNOWFLAKE_USER"),
     password=os.getenv("SNOWFLAKE_PASSWORD"),
@@ -17,43 +47,46 @@ conn = snowflake.connector.connect(
 )
 cur = conn.cursor()
 
-# Step 1: Get profiling results (DQ_CHECKS)
-cur.execute("SELECT CHECK_ID, TABLE_NAME, COLUMN_NAME, CHECK_TYPE, CHECK_DETAILS FROM DQ_CHECKS ORDER BY TIMESTAMP DESC LIMIT 5")
+# -------------------------------
+# Fetch latest checks
+# -------------------------------
+cur.execute("""
+    SELECT TABLE_NAME, COLUMN_NAME, CHECK_TYPE, CHECK_DETAILS
+    FROM DQ_CHECKS
+    ORDER BY TIMESTAMP DESC
+    LIMIT 5
+""")
 rows = cur.fetchall()
 
-# Step 2: Send each row to the local API
+# -------------------------------
+# Process each check
+# -------------------------------
 for row in rows:
-    check_id, table_name, column_name, check_type, check_details = row
+    table_name, column_name, check_type, check_details = row
 
-    payload = {
-        "table_name": table_name,
-        "column_name": column_name,
-        "check_type": check_type,
-        "check_details": check_details
-    }
+    # Summarize
+    summary = summarize_check(table_name, column_name, check_type, check_details)
 
-    response = requests.post("http://localhost:8000/analyze", json=payload)
-    if response.status_code != 200:
-        print(f"❌ API failed for CHECK_ID={check_id}: {response.text}")
-        continue
+    print(f"\n📤 Sending to LLM API:\n{summary}\n")
 
-    result = response.json()
+    try:
+        # Send only summary to API
+        response = requests.post("http://127.0.0.1:8000/analyze", json={"summary": summary}).json()
+        suggestion = response.get("ai_suggestion", "")
+        confidence = response.get("confidence_score", 0.0)
 
-    # Step 3: Insert response into DQ_AI_SUGGESTIONS
-    insert_sql = """
-        INSERT INTO DQ_AI_SUGGESTIONS (TABLE_NAME, COLUMN_NAME, ISSUE_DESCRIPTION, AI_SUGGESTION, CONFIDENCE_SCORE, TIMESTAMP)
-        SELECT %s, %s, %s, %s, %s, CURRENT_TIMESTAMP
-    """
-    cur.execute(insert_sql, (
-        table_name,
-        column_name,
-        result["issue_description"],
-        result["ai_suggestion"],
-        result["confidence_score"]
-    ))
+        # Insert into Snowflake
+        insert_sql = """
+            INSERT INTO DQ_AI_SUGGESTIONS (TABLE_NAME, COLUMN_NAME, ISSUE_DESCRIPTION, AI_SUGGESTION, CONFIDENCE_SCORE, TIMESTAMP)
+            SELECT %s, %s, %s, %s, %s, CURRENT_TIMESTAMP
+        """
+        cur.execute(insert_sql, (table_name, column_name, summary, suggestion, confidence))
+        conn.commit()
 
-    print(f"✅ Inserted suggestion for CHECK_ID={check_id}")
+        print(f"✅ Stored suggestion for {table_name}.{column_name}: {suggestion}")
 
-conn.commit()
+    except Exception as e:
+        print(f"❌ Error processing {table_name}.{column_name}: {e}")
+
 cur.close()
 conn.close()

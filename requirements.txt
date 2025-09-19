@@ -1,0 +1,23 @@
+# API framework
+fastapi
+uvicorn
+
+# Hugging Face + Transformers
+transformers>=4.42.0
+accelerate
+torch
+sentencepiece   # needed for some tokenizers
+protobuf        # tokenizer models
+hf_xet
+
+# Optional: quantization (for 4/8-bit loading)
+bitsandbytes
+
+# Environment management
+python-dotenv
+
+# Snowflake connector (for orchestration script)
+snowflake-connector-python
+
+# Requests (for orchestrator → API calls)
+requests
