@@ -1,48 +1,16 @@
+# orchestrator_refactored.py
 import os
 import json
 import requests
 import snowflake.connector
+import pandas as pd
 from dotenv import load_dotenv
 
-# Load environment variables
+# -------------------------------
+# Load env vars & connect to Snowflake
+# -------------------------------
 load_dotenv("variables.env")
 
-# -------------------------------
-# Summarizer Function
-# -------------------------------
-def summarize_check(table_name, column_name, check_type, check_details_str):
-    """
-    Convert raw profiling JSON into a condensed English summary for the LLM.
-    """
-    try:
-        details = json.loads(check_details_str)
-    except Exception:
-        return f"Issue detected in {table_name}.{column_name}: {check_details_str}"
-
-    desc = details.get("description", f"Issue in {column_name}")
-    results = details.get("results", [])
-
-    stats_parts = []
-    if isinstance(results, list) and results:
-        res = results[0]
-        if "MIN_VAL" in res and "MAX_VAL" in res:
-            stats_parts.append(f"Range: {res['MIN_VAL']}–{res['MAX_VAL']}")
-        if "AVG_VAL" in res:
-            try:
-                stats_parts.append(f"Average: {float(res['AVG_VAL']):.2f}")
-            except Exception:
-                stats_parts.append(f"Average: {res['AVG_VAL']}")
-        if "MISSING_COUNT" in res:
-            stats_parts.append(f"Missing: {res['MISSING_COUNT']}")
-        if "CNT" in res:
-            stats_parts.append(f"Rows checked: {res['CNT']}")
-
-    stats_summary = ", ".join(stats_parts) if stats_parts else "No summary stats available"
-    return f"{desc}. {stats_summary}"
-
-# -------------------------------
-# Snowflake Connection
-# -------------------------------
 conn = snowflake.connector.connect(
     user=os.getenv("SNOWFLAKE_USER"),
     password=os.getenv("SNOWFLAKE_PASSWORD"),
@@ -54,71 +22,135 @@ conn = snowflake.connector.connect(
 cur = conn.cursor()
 
 # -------------------------------
-# Fetch checks from all tables
+# Simple severity classifier (rule-based for now)
 # -------------------------------
-check_tables = ["APP_CHECKS", "BUREAU_CHECKS", "PREV_APP_CHECKS", "INST_CHECKS"]
+def classify_issue(issue_type, value=None, pct=None):
+    if issue_type == "MISSING" and pct is not None:
+        if pct > 0.3:
+            return "High"
+        elif pct > 0.1:
+            return "Medium"
+        else:
+            return "Low"
+    if issue_type == "NEGATIVE" and value is not None:
+        return "High"
+    if issue_type == "DUPLICATE":
+        return "High"
+    if issue_type == "OUTLIER":
+        return "Medium"
+    return "Low"
 
-for check_table in check_tables:
-    print(f"\n🔍 Processing checks from {check_table}...\n")
+# -------------------------------
+# Anomaly summarizer for LLM
+# -------------------------------
+def make_summary(table_name, column_name, column_desc, issue_type, severity, detail):
+    if issue_type == "MISSING":
+        return f"{severity} severity: {detail}% of values in {column_name} are missing in {table_name}."
+    if issue_type == "NEGATIVE":
+        return f"{severity} severity: Negative value {detail} found in {column_name} in {table_name}."
+    if issue_type == "DUPLICATE":
+        return f"{severity} severity: Duplicate SK_ID found in {table_name} ({detail})."
+    if issue_type == "OUTLIER":
+        return f"{severity} severity: Outlier value {detail} detected in {column_name} in {table_name}."
+    return f"{severity} severity issue in {column_name} of {table_name}: {detail}"
 
-    cur.execute(f"""
-        SELECT 
-            c.TABLE_NAME, 
-            c.COLUMN_NAME, 
-            c.CHECK_TYPE, 
-            c.CHECK_DETAILS, 
-            d.DESCRIPTION
-        FROM {check_table} AS c
-        LEFT JOIN COLUMN_DICTIONARY AS d
-            ON UPPER(c.TABLE_NAME) = UPPER(d.TABLE_NAME)
-           AND UPPER(c.COLUMN_NAME) = UPPER(d.ROW_NAME)
-        ORDER BY c.TIMESTAMP DESC
-        LIMIT 5
-    """)
+# -------------------------------
+# Get one SK_ID sample
+# -------------------------------
+def fetch_customer_data(sk_id):
+    app_df = pd.read_sql(f"SELECT * FROM SAMPLE_APPLICATION WHERE SK_ID_CURR = {sk_id}", conn)
+    bureau_df = pd.read_sql(f"SELECT * FROM SAMPLE_BUREAU WHERE SK_ID_CURR = {sk_id}", conn)
+    return app_df, bureau_df
 
-    rows = cur.fetchall()
+# -------------------------------
+# Process one customer
+# -------------------------------
+def process_customer(sk_id):
+    app_df, bureau_df = fetch_customer_data(sk_id)
+    all_checks = []
 
-    for row in rows:
-        table_name, column_name, check_type, check_details, column_desc = row
-        column_desc = column_desc or "No description available"
+    # --- Application table checks ---
+    for col in ["AMT_ANNUITY", "AMT_CREDIT", "AMT_INCOME_TOTAL", "DAYS_EMPLOYED"]:
+        vals = app_df[col].dropna()
+        missing_pct = 1 - len(vals) / len(app_df) if len(app_df) else 0
+        if missing_pct > 0:
+            sev = classify_issue("MISSING", pct=missing_pct)
+            all_checks.append(("SAMPLE_APPLICATION", col, "MISSING", sev, round(missing_pct*100,1)))
+        for v in vals:
+            if v < 0:
+                sev = classify_issue("NEGATIVE", value=v)
+                all_checks.append(("SAMPLE_APPLICATION", col, "NEGATIVE", sev, v))
 
-        # Build summary for LLM
-        summary = summarize_check(table_name, column_name, check_type, check_details)
+    # --- Bureau table checks ---
+    for col in ["AMT_CREDIT_SUM", "AMT_ANNUITY"]:
+        vals = bureau_df[col].dropna()
+        missing_pct = 1 - len(vals) / len(bureau_df) if len(bureau_df) else 0
+        if missing_pct > 0:
+            sev = classify_issue("MISSING", pct=missing_pct)
+            all_checks.append(("SAMPLE_BUREAU", col, "MISSING", sev, round(missing_pct*100,1)))
+        for v in vals:
+            if v < 0:
+                sev = classify_issue("NEGATIVE", value=v)
+                all_checks.append(("SAMPLE_BUREAU", col, "NEGATIVE", sev, v))
 
-        print(f"\n📤 Sending to LLM API for {table_name}.{column_name}...\n")
+    # -------------------------------
+    # Build combined payload for LLM
+    # -------------------------------
+    payload_checks = []
+    for table_name, col, issue_type, severity, detail in all_checks:
+        cur.execute("""
+            SELECT DESCRIPTION 
+            FROM COLUMN_DICTIONARY 
+            WHERE TABLE_NAME=%s AND ROW_NAME=%s
+        """, (table_name, col))
+        desc_row = cur.fetchone()
+        column_desc = desc_row[0] if desc_row else "No description available"
 
-        try:
-            # Send structured payload
-            payload = {
-                "table_name": table_name,
-                "column_name": column_name,
-                "column_desc": column_desc,
-                "check_summary": summary
-            }
-            response = requests.post("http://127.0.0.1:8000/analyze", json=payload).json()
+        summary = make_summary(table_name, col, column_desc, issue_type, severity, detail)
 
-            # Store the raw JSON output from LLM
-            insert_sql = """
-                INSERT INTO DQ_AI_SUGGESTIONS 
-                (TABLE_NAME, COLUMN_NAME, ISSUE_DESCRIPTION, AI_SUGGESTION, CONFIDENCE_SCORE, TIMESTAMP)
-                SELECT %s, %s, %s, %s, %s, CURRENT_TIMESTAMP
-            """
+        payload_checks.append({
+            "table_name": table_name,
+            "column_name": col,
+            "column_desc": column_desc,
+            "check_summary": summary
+        })
+
+    payload = {
+        "customer_id": str(sk_id),
+        "all_checks": payload_checks
+    }
+
+    print(f"\n📤 Sending combined payload to LLM:\n{json.dumps(payload, indent=2)}\n")
+    try:
+        response = requests.post("http://127.0.0.1:8000/analyze_combined", json=payload).json()
+
+        insert_sql = """
+            INSERT INTO DQ_AI_SUGGESTIONS
+            (TABLE_NAME, COLUMN_NAME, ISSUE_DESCRIPTION, AI_SUGGESTION, CONFIDENCE_SCORE, TIMESTAMP)
+            SELECT %s, %s, %s, %s, %s, CURRENT_TIMESTAMP
+        """
+        for check in payload_checks:
             cur.execute(
                 insert_sql,
                 (
-                    table_name,
-                    column_name,
-                    summary,
-                    json.dumps(response),  # store full structured JSON
+                    check["table_name"],
+                    check["column_name"],
+                    check["check_summary"],
+                    json.dumps(response),
                     response.get("confidence", 0.0),
                 ),
             )
-            conn.commit()
+        conn.commit()
+        print(f"✅ Stored combined suggestion for customer {sk_id}, confidence={response.get('confidence','N/A')}")
+    except Exception as e:
+        print(f"❌ Error sending to LLM: {e}")
 
-            print(f"✅ Stored suggestion for {table_name}.{column_name}: {response.get('suggestion', 'N/A')}")
+# -------------------------------
+# MAIN
+# -------------------------------
+if __name__ == "__main__":
+    test_sk_id = 171559  # pick one ID to test
+    process_customer(test_sk_id)
 
-        except Exception as e:
-            print(f"❌ Error processing {table_name}.{column_name}: {e}")
-
-cur.close()
-conn.close()
+    cur.close()
+    conn.close()

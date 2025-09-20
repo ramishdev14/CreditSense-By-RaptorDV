@@ -1,164 +1,253 @@
+# dq_profiler_api.py
+from fastapi import FastAPI, Query
+from enum import Enum
+from typing import List, Optional, Dict, Any
 import os
 import json
+from datetime import datetime
+
+import pandas as pd
 import snowflake.connector
-import datetime  # <-- Added this import
-from snowflake.connector import DictCursor
 from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv('variables.env')
+# ------------------------------------------------------
+# Env & Snowflake connection
+# ------------------------------------------------------
+load_dotenv("variables.env")
 
-def get_snowflake_connection():
-    """Establishes and returns a Snowflake connection."""
-    return snowflake.connector.connect(
-        account=os.getenv('SNOWFLAKE_ACCOUNT'),
-        user=os.getenv('SNOWFLAKE_USER'),
-        password=os.getenv('SNOWFLAKE_PASSWORD'),
-        warehouse=os.getenv('SNOWFLAKE_WAREHOUSE'),
-        database=os.getenv('SNOWFLAKE_DATABASE'),
-        schema=os.getenv('SNOWFLAKE_SCHEMA')
-    )
+SF_CFG = dict(
+    user=os.getenv("SNOWFLAKE_USER"),
+    password=os.getenv("SNOWFLAKE_PASSWORD"),
+    account=os.getenv("SNOWFLAKE_ACCOUNT"),
+    warehouse=os.getenv("SNOWFLAKE_WAREHOUSE"),
+    database=os.getenv("SNOWFLAKE_DATABASE"),
+    schema=os.getenv("SNOWFLAKE_SCHEMA"),
+)
 
-def profile_table(conn, table_name):
-    """Profiles a given table and returns a JSON summary."""
-    
-    # Get basic table info and row count
-    with conn.cursor(DictCursor) as cur:
-        cur.execute(f"SELECT COUNT(*) AS row_count FROM {table_name}")
-        global_stats = cur.fetchone()
-        row_count = global_stats['ROW_COUNT']
+TABLES = {
+    "SAMPLE_APPLICATION": {"key_curr": "SK_ID_CURR", "key_prev": None, "checks_table": "APP_CHECKS"},
+    "SAMPLE_BUREAU": {"key_curr": "SK_ID_CURR", "key_prev": None, "checks_table": "BUREAU_CHECKS"},
+    "SAMPLE_PREVIOUS_APP": {"key_curr": "SK_ID_CURR", "key_prev": "SK_ID_PREV", "checks_table": "PREV_APP_CHECKS"},
+    "SAMPLE_INSTALLMENTS": {"key_curr": "SK_ID_CURR", "key_prev": "SK_ID_PREV", "checks_table": "INST_CHECKS"},
+}
 
-    # Get column metadata
-    with conn.cursor(DictCursor) as cur:
-        cur.execute(f"""
-            SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE
-            FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_NAME = '{table_name}'
-            ORDER BY ORDINAL_POSITION
-        """)
-        columns_metadata = cur.fetchall()
+app = FastAPI(title="DQ Row-Level Profiler", version="1.0")
 
-    column_stats = {}
-    
-    # Analyze each column
-    for col in columns_metadata:
-        col_name = col['COLUMN_NAME']
-        data_type = col['DATA_TYPE']
-        print(f"Profiling column: {col_name}")
+def get_conn():
+    return snowflake.connector.connect(**SF_CFG)
 
-        stats = {'dtype': data_type}
-        
-        with conn.cursor(DictCursor) as cur:
-            # Calculate completeness (not null percentage)
-            try:
-                cur.execute(f"""
-                    SELECT 
-                        COUNT(*) AS total,
-                        SUM(CASE WHEN {col_name} IS NULL THEN 1 ELSE 0 END) AS null_count
-                    FROM {table_name}
-                """)
-                completeness_result = cur.fetchone()
-                null_count = completeness_result['NULL_COUNT']
-                stats['completeness'] = 1.0 - (null_count / row_count)
-                stats['missing_count'] = null_count
-            except Exception as e:
-                print(f"Error calculating completeness for {col_name}: {e}")
-                stats['completeness'] = None
-                stats['missing_count'] = None
+# ------------------------------------------------------
+# INSERT helper — uses existing checks schema:
+# (TABLE_NAME, COLUMN_NAME, CHECK_TYPE, CHECK_DETAILS VARIANT, SK_ID_CURR, SK_ID_PREV, TIMESTAMP)
+# ------------------------------------------------------
+def insert_issue(cur, checks_table: str, table_name: str,
+                 column_name: str, issue_type: str, issue_value: Any,
+                 sk_id_curr: Optional[Any] = None,
+                 sk_id_prev: Optional[Any] = None,
+                 sk_id_bureau: Optional[Any] = None):
+    details = {"value": issue_value}
 
-            # Column-specific statistics based on data type
-            if data_type in ('NUMBER', 'INTEGER', 'FLOAT', 'DECIMAL'):
-                try:
-                    cur.execute(f"""
-                        SELECT 
-                            MIN({col_name}) AS min_val,
-                            MAX({col_name}) AS max_val,
-                            AVG({col_name}) AS mean_val,
-                            STDDEV({col_name}) AS std_dev,
-                            SUM(CASE WHEN {col_name} = 0 THEN 1 ELSE 0 END) AS zeros
-                        FROM {table_name}
-                    """)
-                    num_stats = cur.fetchone()
-                    stats.update({
-                        'min': float(num_stats['MIN_VAL']) if num_stats['MIN_VAL'] is not None else None,
-                        'max': float(num_stats['MAX_VAL']) if num_stats['MAX_VAL'] is not None else None,
-                        'mean': float(num_stats['MEAN_VAL']) if num_stats['MEAN_VAL'] is not None else None,
-                        'std_dev': float(num_stats['STD_DEV']) if num_stats['STD_DEV'] is not None else None,
-                        'zeros': num_stats['ZEROS']
-                    })
-                except Exception as e:
-                    print(f"Error calculating numeric stats for {col_name}: {e}")
+    if checks_table == "APP_CHECKS":
+        cur.execute(
+            f"""
+            INSERT INTO {checks_table}
+            (TABLE_NAME, COLUMN_NAME, CHECK_TYPE, CHECK_DETAILS, SK_ID_CURR, TIMESTAMP)
+            SELECT %s, %s, %s, PARSE_JSON(%s), %s, CURRENT_TIMESTAMP
+            """,
+            (table_name, column_name, issue_type, json.dumps(details), sk_id_curr)
+        )
 
-            elif data_type == 'VARCHAR':
-                try:
-                    cur.execute(f"""
-                        SELECT 
-                            COUNT(DISTINCT {col_name}) AS unique_count,
-                            MODE({col_name}) AS most_common
-                        FROM {table_name}
-                    """)
-                    char_stats = cur.fetchone()
-                    stats.update({
-                        'unique_values': char_stats['UNIQUE_COUNT'],
-                        'most_common': char_stats['MOST_COMMON']
-                    })
-                except Exception as e:
-                    print(f"Error calculating varchar stats for {col_name}: {e}")
+    elif checks_table == "BUREAU_CHECKS":
+        cur.execute(
+            f"""
+            INSERT INTO {checks_table}
+            (TABLE_NAME, COLUMN_NAME, CHECK_TYPE, CHECK_DETAILS, SK_ID_CURR, SK_ID_BUREAU, TIMESTAMP)
+            SELECT %s, %s, %s, PARSE_JSON(%s), %s, %s, CURRENT_TIMESTAMP
+            """,
+            (table_name, column_name, issue_type, json.dumps(details), sk_id_curr, sk_id_bureau)
+        )
 
-        column_stats[col_name] = stats
+    else:  # PREV_APP_CHECKS and INST_CHECKS
+        cur.execute(
+            f"""
+            INSERT INTO {checks_table}
+            (TABLE_NAME, COLUMN_NAME, CHECK_TYPE, CHECK_DETAILS, SK_ID_CURR, SK_ID_PREV, TIMESTAMP)
+            SELECT %s, %s, %s, PARSE_JSON(%s), %s, %s, CURRENT_TIMESTAMP
+            """,
+            (table_name, column_name, issue_type, json.dumps(details), sk_id_curr, sk_id_prev)
+        )
 
-    # Check for duplicate rows based on primary key (assuming SK_ID_CURR should be unique)
-    with conn.cursor(DictCursor) as cur:
-        try:
-            cur.execute(f"""
-                SELECT COUNT(*) AS duplicate_rows 
-                FROM (
-                    SELECT SK_ID_CURR, COUNT(*) 
-                    FROM {table_name} 
-                    GROUP BY SK_ID_CURR 
-                    HAVING COUNT(*) > 1
-                )
-            """)
-            duplicate_result = cur.fetchone()
-            global_stats['duplicate_rows'] = duplicate_result['DUPLICATE_ROWS']
-        except:
-            global_stats['duplicate_rows'] = 0
+# ------------------------------------------------------
+# Rule packs (row-level)
+# ------------------------------------------------------
+VALID_CODE_GENDER = {"M", "F"}  # dataset also has 'XNA' occasionally — treat as invalid
+VALID_CONTRACT_TYPE = {"Cash loans", "Revolving loans"}
+VALID_CREDIT_ACTIVE = {"Active", "Bad debt", "Closed", "Sold"}
+VALID_CREDIT_CURRENCY = {"currency 1", "currency 2", "currency 3", "currency 4"}
 
-    # Build the final JSON profile
-    profile_json = {
-        "table_name": table_name,
-        "profile_timestamp": str(datetime.datetime.now()),  # <-- Fixed this line
-        "column_stats": column_stats,
-        "global_stats": {
-            "row_count": row_count,
-            "duplicate_rows": global_stats['duplicate_rows']
-        }
-    }
-    
-    return profile_json
+def is_number(x):
+    return isinstance(x, (int, float)) and pd.notna(x)
 
-def main():
-    """Main function to run the profiling."""
-    print("Starting Data Profiling...")
-    
-    conn = get_snowflake_connection()
-    print("Connected to Snowflake.")
-    
-    try:
-        # Profile our target table
-        profile_data = profile_table(conn, "RAW_APPLICATION_DATA")
-        
-        # Save the profile to a JSON file (for the AI service to use)
-        output_file = "data_profile.json"
-        with open(output_file, 'w') as f:
-            json.dump(profile_data, f, indent=2)
-        
-        print(f"Profiling complete! Results saved to {output_file}")
-        print(f"Profiled {len(profile_data['column_stats'])} columns.")
-        
-    finally:
-        conn.close()
-        print("Snowflake connection closed.")
+def rulepack_application(row: pd.Series, cur, checks_table: str):
+    sk_curr = row.get("SK_ID_CURR")
 
-if __name__ == "__main__":
-    main()
+    # Nulls
+    for col, val in row.items():
+        if col == "SK_ID_CURR":
+            continue
+        if pd.isna(val):
+            insert_issue(cur, checks_table, "SAMPLE_APPLICATION", col,
+                         "NULL_VALUE", None, sk_id_curr=sk_curr)
+
+    # Negative values
+    for col in ["CNT_CHILDREN", "AMT_INCOME_TOTAL", "AMT_CREDIT", "AMT_ANNUITY"]:
+        val = row.get(col)
+        if is_number(val) and val < 0:
+            insert_issue(cur, checks_table, "SAMPLE_APPLICATION", col,
+                         "NEGATIVE_VALUE", val, sk_id_curr=sk_curr)
+
+    # Days anomalies
+    if is_number(row.get("DAYS_BIRTH")) and row["DAYS_BIRTH"] > 0:
+        insert_issue(cur, checks_table, "SAMPLE_APPLICATION", "DAYS_BIRTH",
+                     "INVALID_AGE_DIRECTION", row["DAYS_BIRTH"], sk_id_curr=sk_curr)
+
+    if is_number(row.get("DAYS_EMPLOYED")) and row["DAYS_EMPLOYED"] > 0:
+        insert_issue(cur, checks_table, "SAMPLE_APPLICATION", "DAYS_EMPLOYED",
+                     "INVALID_EMPLOYMENT_DAYS", row["DAYS_EMPLOYED"], sk_id_curr=sk_curr)
+
+
+def rulepack_bureau(row: pd.Series, cur, checks_table: str):
+    sk_curr = row.get("SK_ID_CURR")
+    sk_bureau = row.get("SK_ID_BUREAU")
+
+    for col, val in row.items():
+        if col in ("SK_ID_CURR", "SK_ID_BUREAU"):
+            continue
+        if pd.isna(val):
+            insert_issue(cur, checks_table, "SAMPLE_BUREAU", col,
+                         "NULL_VALUE", None, sk_id_curr=sk_curr, sk_id_bureau=sk_bureau)
+
+    # Negative amounts
+    for col in ["AMT_CREDIT_MAX_OVERDUE", "AMT_CREDIT_SUM", "AMT_CREDIT_SUM_DEBT",
+                "AMT_CREDIT_SUM_LIMIT", "AMT_CREDIT_SUM_OVERDUE", "AMT_ANNUITY"]:
+        val = row.get(col)
+        if is_number(val) and val < 0:
+            insert_issue(cur, checks_table, "SAMPLE_BUREAU", col,
+                         "NEGATIVE_VALUE", val, sk_id_curr=sk_curr, sk_id_bureau=sk_bureau)
+
+
+def rulepack_previous_app(row: pd.Series, cur, checks_table: str):
+    sk_curr = row.get("SK_ID_CURR")
+    sk_prev = row.get("SK_ID_PREV")
+
+    for col, val in row.items():
+        if col in ("SK_ID_CURR", "SK_ID_PREV"):
+            continue
+        if pd.isna(val):
+            insert_issue(cur, checks_table, "SAMPLE_PREVIOUS_APP", col,
+                         "NULL_VALUE", None, sk_id_curr=sk_curr, sk_id_prev=sk_prev)
+
+    # Negative amounts
+    for col in ["AMT_ANNUITY", "AMT_APPLICATION", "AMT_CREDIT", "AMT_DOWN_PAYMENT", "AMT_GOODS_PRICE"]:
+        val = row.get(col)
+        if is_number(val) and val < 0:
+            insert_issue(cur, checks_table, "SAMPLE_PREVIOUS_APP", col,
+                         "NEGATIVE_VALUE", val, sk_id_curr=sk_curr, sk_id_prev=sk_prev)
+
+
+def rulepack_installments(row: pd.Series, cur, checks_table: str):
+    sk_curr = row.get("SK_ID_CURR")
+    sk_prev = row.get("SK_ID_PREV")
+
+    for col, val in row.items():
+        if col in ("SK_ID_CURR", "SK_ID_PREV"):
+            continue
+        if pd.isna(val):
+            insert_issue(cur, checks_table, "SAMPLE_INSTALLMENTS", col,
+                         "NULL_VALUE", None, sk_id_curr=sk_curr, sk_id_prev=sk_prev)
+
+    inst = row.get("AMT_INSTALMENT")
+    pay = row.get("AMT_PAYMENT")
+    if is_number(inst) and is_number(pay):
+        if pay > inst * 1.5:
+            insert_issue(cur, checks_table, "SAMPLE_INSTALLMENTS", "AMT_PAYMENT",
+                         "POTENTIAL_OVERPAYMENT", pay, sk_id_curr=sk_curr, sk_id_prev=sk_prev)
+        if pay < 0.5 * inst:
+            insert_issue(cur, checks_table, "SAMPLE_INSTALLMENTS", "AMT_PAYMENT",
+                         "POTENTIAL_UNDERPAYMENT", pay, sk_id_curr=sk_curr, sk_id_prev=sk_prev)
+
+# Map table → rulepack
+RULEPACKS = {
+    "SAMPLE_APPLICATION": rulepack_application,
+    "SAMPLE_BUREAU": rulepack_bureau,
+    "SAMPLE_PREVIOUS_APP": rulepack_previous_app,
+    "SAMPLE_INSTALLMENTS": rulepack_installments,
+}
+
+# ------------------------------------------------------
+# Core profiler
+# ------------------------------------------------------
+def profile_table(conn, table_name: str):
+    cfg = TABLES[table_name]
+    checks_table = cfg["checks_table"]
+    key_curr = cfg["key_curr"]; key_prev = cfg["key_prev"]
+
+    df = pd.read_sql(f"SELECT * FROM {table_name}", conn)
+    if df.empty:
+        return {"table": table_name, "rows": 0, "issues": 0}
+
+    cur = conn.cursor()
+    issues_before = cur.execute(f"SELECT COUNT(*) FROM {checks_table}").fetchone()[0]
+
+    # Duplicate check by key(s)
+    keys = [k for k in [key_curr, key_prev] if k]
+    if keys:
+        dup = df.duplicated(subset=keys, keep=False)
+        for _, r in df[dup].iterrows():
+            insert_issue(cur, checks_table, table_name, "|".join(keys), "DUPLICATE_KEY",
+                         "|".join(str(r[k]) for k in keys),
+                         r.get(key_curr), r.get(key_prev))
+
+    # Row-level rules
+    rulepack = RULEPACKS[table_name]
+    for _, row in df.iterrows():
+        rulepack(row, cur, checks_table)   # ✅ pass cur explicitly
+
+    conn.commit()
+    issues_after = cur.execute(f"SELECT COUNT(*) FROM {checks_table}").fetchone()[0]
+    cur.close()
+    return {"table": table_name, "rows": int(df.shape[0]), "issues": int(issues_after - issues_before)}
+
+# ------------------------------------------------------
+# Endpoints
+# ------------------------------------------------------
+class ProfileTarget(str, Enum):
+    SAMPLE_APPLICATION = "SAMPLE_APPLICATION"
+    SAMPLE_BUREAU = "SAMPLE_BUREAU"
+    SAMPLE_PREVIOUS_APP = "SAMPLE_PREVIOUS_APP"
+    SAMPLE_INSTALLMENTS = "SAMPLE_INSTALLMENTS"
+
+@app.get("/profile_all")
+def profile_all(truncate_first: bool = True):
+    conn = get_conn()
+    cur = conn.cursor()
+
+    if truncate_first:
+        print("🧹 Truncating all check tables...")
+        cur.execute("TRUNCATE TABLE APP_CHECKS")
+        cur.execute("TRUNCATE TABLE BUREAU_CHECKS")
+        cur.execute("TRUNCATE TABLE PREV_APP_CHECKS")
+        cur.execute("TRUNCATE TABLE INST_CHECKS")
+        conn.commit()
+
+    cur.close()
+
+    results = []
+    # Explicit calls, easier to debug/manage
+    results.append(profile_table(conn, "SAMPLE_APPLICATION"))
+    results.append(profile_table(conn, "SAMPLE_BUREAU"))
+    results.append(profile_table(conn, "SAMPLE_PREVIOUS_APP"))
+    results.append(profile_table(conn, "SAMPLE_INSTALLMENTS"))
+
+    conn.close()
+    return {"status": "ok", "results": results}

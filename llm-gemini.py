@@ -1,59 +1,36 @@
+# llm_service_gemini.py
 from fastapi import FastAPI
-from pydantic import BaseModel, Field
-import uvicorn
-import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
-from dotenv import load_dotenv
+from pydantic import BaseModel
+import google.generativeai as genai
 import os
 import json
-from typing import List
+from dotenv import load_dotenv
 
-# -------------------------------
-# Env & Model
-# -------------------------------
+# Load environment variables
 load_dotenv("variables.env")
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
-HF_TOKEN = os.getenv("HUGGING_FACE")
-MODEL_NAME = "mistralai/Mistral-7B-Instruct-v0.2"
+# Use Gemini model (choose pro or flash depending on speed/quality tradeoff)
+MODEL_NAME = "gemini-1.5-flash"
+model = genai.GenerativeModel(MODEL_NAME)
 
-app = FastAPI(title="DQ AI LLM Service", version="1.0")
-
-generator = None
-
-def get_generator():
-    global generator
-    if generator is None:
-        print("⏳ Loading Mistral 7B Instruct...")
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, token=HF_TOKEN)
-        model = AutoModelForCausalLM.from_pretrained(
-            MODEL_NAME,
-            torch_dtype=torch.float16,
-            device_map="auto",
-            token=HF_TOKEN
-        )
-        generator = pipeline(
-            "text-generation",
-            model=model,
-            tokenizer=tokenizer,
-            torch_dtype=torch.float16
-        )
-    return generator
+app = FastAPI(title="Gemini LLM Service")
 
 # -------------------------------
 # Request schema
 # -------------------------------
-class CheckDetail(BaseModel):
+class CombinedCheck(BaseModel):
     table_name: str
     column_name: str
     column_desc: str
     check_summary: str
 
-class CombinedDQRequest(BaseModel):
+class CombinedRequest(BaseModel):
     customer_id: str
-    all_checks: List[CheckDetail] = Field(..., description="List of checks across tables for one customer")
+    all_checks: list[CombinedCheck]
 
 # -------------------------------
-# Canonical Prompt
+# Prompt template
 # -------------------------------
 JSON_SCHEMA = """
 {
@@ -78,12 +55,12 @@ JSON_SCHEMA = """
 """
 
 PROMPT_TEMPLATE = """
-You are an expert data quality analyst for a financial services company. 
-Your task is to analyze a combined profiling summary for a single customer and provide structured, actionable suggestions. 
+You are an expert data quality analyst for a financial services company.
+Your task is to analyze profiling summaries for a single customer and provide structured, actionable suggestions.
 Focus on root cause, anomaly signature, and lineage.
 
 ### DATA CONTEXT
-- Platform: Snowflake (but response must be platform-agnostic)
+- Platform: Snowflake (platform-agnostic response required)
 - Dataset Focus: Home Credit (credit risk)
 - Core Tables & Relationships:
   - SAMPLE_APPLICATION links to SAMPLE_BUREAU on SK_ID_CURR
@@ -108,9 +85,7 @@ Return only JSON, no extra text.
 # Endpoint
 # -------------------------------
 @app.post("/analyze_combined")
-def analyze_combined(request: CombinedDQRequest):
-    generator = get_generator()
-
+def analyze_combined(request: CombinedRequest):
     combined_summary = ""
     for check in request.all_checks:
         combined_summary += f"- Table: {check.table_name}, Column: {check.column_name} ({check.column_desc})\n"
@@ -122,35 +97,30 @@ def analyze_combined(request: CombinedDQRequest):
         combined_summary=combined_summary
     )
 
-    print("\n================= PROMPT SENT TO MODEL =================")
+    print("\n================= PROMPT SENT TO GEMINI =================")
     print(prompt)
-    print("========================================================\n")
-
-    result = generator(
-        prompt,
-        max_new_tokens=400,
-        temperature=0.3,
-        do_sample=False
-    )
-
-    raw_output = result[0]["generated_text"]
-    print("\n================= RAW MODEL OUTPUT =================")
-    print(raw_output)
-    print("====================================================\n")
+    print("=========================================================\n")
 
     try:
+        response = model.generate_content(prompt)
+        raw_output = response.text
+        print("\n================= RAW MODEL OUTPUT =================")
+        print(raw_output)
+        print("====================================================\n")
+
+        # Extract JSON
         json_start = raw_output.find("{")
         json_end = raw_output.rfind("}") + 1
         suggestion_json = json.loads(raw_output[json_start:json_end])
     except Exception as e:
-        print(f"⚠️ JSON parse failed: {e}")
+        print(f"⚠️ Gemini parse failed: {e}")
         suggestion_json = {
             "dq_dimension": "Unknown",
             "suggestion": "Abstain",
             "rule_template_sql": None,
             "severity": "low",
             "confidence": 0.0,
-            "rationale": "Failed to parse model output",
+            "rationale": "Failed to parse Gemini output",
             "anomaly_signature": None,
             "root_cause_hypothesis": None,
             "lineage_hypothesis": [],
@@ -163,9 +133,5 @@ def analyze_combined(request: CombinedDQRequest):
 # Entry point
 # -------------------------------
 if __name__ == "__main__":
-    uvicorn.run(
-        "llm_service:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True
-    )
+    import uvicorn
+    uvicorn.run("llm_service_gemini:app", host="0.0.0.0", port=8001, reload=True)
