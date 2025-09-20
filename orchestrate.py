@@ -1,4 +1,3 @@
-# orchestrator_refactored.py
 import os
 import json
 import requests
@@ -45,7 +44,7 @@ def fetch_customer_data(sk_id):
 # -------------------------------
 # Process one customer
 # -------------------------------
-def process_customer(sk_id):
+def process_customer(sk_id: int):
     app_df, bureau_df = fetch_customer_data(sk_id)
     all_checks = []
 
@@ -55,7 +54,7 @@ def process_customer(sk_id):
         missing_pct = 1 - len(vals) / len(app_df) if len(app_df) else 0
         if missing_pct > 0:
             sev = classify_issue("MISSING", pct=missing_pct)
-            all_checks.append(("SAMPLE_APPLICATION", col, "MISSING", sev, round(missing_pct*100,1)))
+            all_checks.append(("SAMPLE_APPLICATION", col, "MISSING", sev, round(missing_pct*100, 1)))
         for v in vals:
             if v < 0:
                 sev = classify_issue("NEGATIVE", value=v)
@@ -67,7 +66,7 @@ def process_customer(sk_id):
         missing_pct = 1 - len(vals) / len(bureau_df) if len(bureau_df) else 0
         if missing_pct > 0:
             sev = classify_issue("MISSING", pct=missing_pct)
-            all_checks.append(("SAMPLE_BUREAU", col, "MISSING", sev, round(missing_pct*100,1)))
+            all_checks.append(("SAMPLE_BUREAU", col, "MISSING", sev, round(missing_pct*100, 1)))
         for v in vals:
             if v < 0:
                 sev = classify_issue("NEGATIVE", value=v)
@@ -91,11 +90,11 @@ def process_customer(sk_id):
         anomaly_details = {"issue_type": issue_type, "detail": detail}
         cur.execute("""
             INSERT INTO DQ_ANOMALIES
-            (TABLE_NAME, COLUMN_NAME, SK_ID_CURR, SK_ID_PREV, ANOMALY_TYPE, ANOMALY_DETAILS, SEVERITY, TIMESTAMP)
-            SELECT %s, %s, %s, %s, %s, PARSE_JSON(%s), %s, CURRENT_TIMESTAMP
+            (TABLE_NAME, COLUMN_NAME, SK_ID_CURR, SK_ID_PREV, ANOMALY_TYPE, ANOMALY_DETAILS, TIMESTAMP)
+            SELECT %s, %s, %s, %s, %s, PARSE_JSON(%s), CURRENT_TIMESTAMP
         """, (
             table_name, col, int(sk_id), None,
-            issue_type, json.dumps(anomaly_details), severity
+            issue_type, json.dumps(anomaly_details)
         ))
         conn.commit()
 
@@ -127,10 +126,11 @@ def process_customer(sk_id):
         for suggestion in suggestions:
             cur.execute("""
                 INSERT INTO DQ_AI_SUGGESTIONS
-                (TABLE_NAME, COLUMN_NAME, ISSUE_DESCRIPTION, RAW_LLM_OUTPUT, AI_SUGGESTION, 
-                 CONFIDENCE_SCORE, ROOT_CAUSE_HYPOTHESIS, LINEAGE_HYPOTHESIS, FOLLOW_UP_CHECKS, TIMESTAMP)
-                SELECT %s, %s, %s, %s, PARSE_JSON(%s), %s, %s, PARSE_JSON(%s), PARSE_JSON(%s), CURRENT_TIMESTAMP
+                (SK_ID_CURR, TABLE_NAME, COLUMN_NAME, ISSUE_DESCRIPTION, RAW_LLM_OUTPUT, AI_SUGGESTION, 
+                 CONFIDENCE_SCORE, ROOT_CAUSE_HYPOTHESIS, LINEAGE_HYPOTHESIS, TIMESTAMP)
+                SELECT %s, %s, %s, %s, %s, PARSE_JSON(%s), %s, %s, PARSE_JSON(%s), CURRENT_TIMESTAMP
             """, (
+                int(sk_id),
                 payload_checks[0]["table"],
                 payload_checks[0]["column"],
                 json.dumps(payload_checks),
@@ -138,8 +138,7 @@ def process_customer(sk_id):
                 json.dumps(suggestion),
                 suggestion.get("confidence", 0.0),
                 suggestion.get("root_cause_hypothesis"),
-                json.dumps(suggestion.get("lineage_hypothesis", [])),
-                json.dumps(suggestion.get("follow_up_checks", []))
+                json.dumps(suggestion.get("lineage_hypothesis", []))
             ))
             conn.commit()
 
@@ -149,7 +148,7 @@ def process_customer(sk_id):
         print(f"❌ Error sending to LLM or inserting suggestions: {e}")
 
 # -------------------------------
-# MAIN
+# MAIN (for standalone runs)
 # -------------------------------
 if __name__ == "__main__":
     test_sk_id = 171559
