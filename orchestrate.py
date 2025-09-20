@@ -22,40 +22,20 @@ conn = snowflake.connector.connect(
 cur = conn.cursor()
 
 # -------------------------------
-# Simple severity classifier (rule-based for now)
+# Simple severity classifier
 # -------------------------------
 def classify_issue(issue_type, value=None, pct=None):
     if issue_type == "MISSING" and pct is not None:
-        if pct > 0.3:
-            return "High"
-        elif pct > 0.1:
-            return "Medium"
-        else:
-            return "Low"
-    if issue_type == "NEGATIVE" and value is not None:
-        return "High"
-    if issue_type == "DUPLICATE":
-        return "High"
-    if issue_type == "OUTLIER":
-        return "Medium"
+        if pct > 0.3: return "High"
+        elif pct > 0.1: return "Medium"
+        else: return "Low"
+    if issue_type == "NEGATIVE" and value is not None: return "High"
+    if issue_type == "DUPLICATE": return "High"
+    if issue_type == "OUTLIER": return "Medium"
     return "Low"
 
 # -------------------------------
-# Anomaly summarizer for LLM
-# -------------------------------
-def make_summary(table_name, column_name, column_desc, issue_type, severity, detail):
-    if issue_type == "MISSING":
-        return f"{severity} severity: {detail}% of values in {column_name} are missing in {table_name}."
-    if issue_type == "NEGATIVE":
-        return f"{severity} severity: Negative value {detail} found in {column_name} in {table_name}."
-    if issue_type == "DUPLICATE":
-        return f"{severity} severity: Duplicate SK_ID found in {table_name} ({detail})."
-    if issue_type == "OUTLIER":
-        return f"{severity} severity: Outlier value {detail} detected in {column_name} in {table_name}."
-    return f"{severity} severity issue in {column_name} of {table_name}: {detail}"
-
-# -------------------------------
-# Get one SK_ID sample
+# Fetch customer data
 # -------------------------------
 def fetch_customer_data(sk_id):
     app_df = pd.read_sql(f"SELECT * FROM SAMPLE_APPLICATION WHERE SK_ID_CURR = {sk_id}", conn)
@@ -94,10 +74,11 @@ def process_customer(sk_id):
                 all_checks.append(("SAMPLE_BUREAU", col, "NEGATIVE", sev, v))
 
     # -------------------------------
-    # Build combined payload for LLM
+    # Insert anomalies & build payload
     # -------------------------------
     payload_checks = []
     for table_name, col, issue_type, severity, detail in all_checks:
+        # Column description
         cur.execute("""
             SELECT DESCRIPTION 
             FROM COLUMN_DICTIONARY 
@@ -106,51 +87,72 @@ def process_customer(sk_id):
         desc_row = cur.fetchone()
         column_desc = desc_row[0] if desc_row else "No description available"
 
-        summary = make_summary(table_name, col, column_desc, issue_type, severity, detail)
+        # Insert anomaly
+        anomaly_details = {"issue_type": issue_type, "detail": detail}
+        cur.execute("""
+            INSERT INTO DQ_ANOMALIES
+            (TABLE_NAME, COLUMN_NAME, SK_ID_CURR, SK_ID_PREV, ANOMALY_TYPE, ANOMALY_DETAILS, SEVERITY, TIMESTAMP)
+            SELECT %s, %s, %s, %s, %s, PARSE_JSON(%s), %s, CURRENT_TIMESTAMP
+        """, (
+            table_name, col, int(sk_id), None,
+            issue_type, json.dumps(anomaly_details), severity
+        ))
+        conn.commit()
 
+        # Add to payload
         payload_checks.append({
-            "table_name": table_name,
-            "column_name": col,
-            "column_desc": column_desc,
-            "check_summary": summary
+            "table": table_name,
+            "column": col,
+            "desc": column_desc,
+            "summary": f"{severity} severity {issue_type} issue: {detail}"
         })
 
-    payload = {
-        "customer_id": str(sk_id),
-        "all_checks": payload_checks
-    }
+    # -------------------------------
+    # Send combined payload to LLM
+    # -------------------------------
+    payload = {"sk_id": int(sk_id), "issues": payload_checks}
+    print(f"\n📤 Sending combined payload for {sk_id}:\n{json.dumps(payload, indent=2)}\n")
 
-    print(f"\n📤 Sending combined payload to LLM:\n{json.dumps(payload, indent=2)}\n")
     try:
-        response = requests.post("http://127.0.0.1:8000/analyze_combined", json=payload).json()
+        resp = requests.post("http://127.0.0.1:8001/analyze_combined", json=payload)
+        resp.raise_for_status()
+        llm = resp.json()
 
-        insert_sql = """
-            INSERT INTO DQ_AI_SUGGESTIONS
-            (TABLE_NAME, COLUMN_NAME, ISSUE_DESCRIPTION, AI_SUGGESTION, CONFIDENCE_SCORE, TIMESTAMP)
-            SELECT %s, %s, %s, %s, %s, CURRENT_TIMESTAMP
-        """
-        for check in payload_checks:
-            cur.execute(
-                insert_sql,
-                (
-                    check["table_name"],
-                    check["column_name"],
-                    check["check_summary"],
-                    json.dumps(response),
-                    response.get("confidence", 0.0),
-                ),
-            )
-        conn.commit()
-        print(f"✅ Stored combined suggestion for customer {sk_id}, confidence={response.get('confidence','N/A')}")
+        raw_output = llm.get("raw_output", "")
+        suggestions = llm.get("parsed_json", [])
+        if isinstance(suggestions, dict):
+            suggestions = [suggestions]
+
+        # Insert each suggestion
+        for suggestion in suggestions:
+            cur.execute("""
+                INSERT INTO DQ_AI_SUGGESTIONS
+                (TABLE_NAME, COLUMN_NAME, ISSUE_DESCRIPTION, RAW_LLM_OUTPUT, AI_SUGGESTION, 
+                 CONFIDENCE_SCORE, ROOT_CAUSE_HYPOTHESIS, LINEAGE_HYPOTHESIS, FOLLOW_UP_CHECKS, TIMESTAMP)
+                SELECT %s, %s, %s, %s, PARSE_JSON(%s), %s, %s, PARSE_JSON(%s), PARSE_JSON(%s), CURRENT_TIMESTAMP
+            """, (
+                payload_checks[0]["table"],
+                payload_checks[0]["column"],
+                json.dumps(payload_checks),
+                raw_output,
+                json.dumps(suggestion),
+                suggestion.get("confidence", 0.0),
+                suggestion.get("root_cause_hypothesis"),
+                json.dumps(suggestion.get("lineage_hypothesis", [])),
+                json.dumps(suggestion.get("follow_up_checks", []))
+            ))
+            conn.commit()
+
+        print(f"✅ Stored {len(suggestions)} AI suggestion(s) for customer {sk_id}")
+
     except Exception as e:
-        print(f"❌ Error sending to LLM: {e}")
+        print(f"❌ Error sending to LLM or inserting suggestions: {e}")
 
 # -------------------------------
 # MAIN
 # -------------------------------
 if __name__ == "__main__":
-    test_sk_id = 171559  # pick one ID to test
+    test_sk_id = 171559
     process_customer(test_sk_id)
-
     cur.close()
     conn.close()

@@ -4,13 +4,15 @@ from pydantic import BaseModel
 import google.generativeai as genai
 import os
 import json
+import re
 from dotenv import load_dotenv
 
+# -------------------------------
 # Load environment variables
+# -------------------------------
 load_dotenv("variables.env")
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
-# Use Gemini model (choose pro or flash depending on speed/quality tradeoff)
 MODEL_NAME = "gemini-1.5-flash"
 model = genai.GenerativeModel(MODEL_NAME)
 
@@ -19,15 +21,15 @@ app = FastAPI(title="Gemini LLM Service")
 # -------------------------------
 # Request schema
 # -------------------------------
-class CombinedCheck(BaseModel):
-    table_name: str
-    column_name: str
-    column_desc: str
-    check_summary: str
+class IssueCheck(BaseModel):
+    table: str
+    column: str
+    desc: str
+    summary: str
 
 class CombinedRequest(BaseModel):
-    customer_id: str
-    all_checks: list[CombinedCheck]
+    sk_id: int
+    issues: list[IssueCheck]
 
 # -------------------------------
 # Prompt template
@@ -73,13 +75,32 @@ Output MUST be valid JSON following this schema:
 {schema}
 
 ### CUSTOMER CONTEXT
-- Customer ID: {customer_id}
+- Customer ID: {sk_id}
 - Combined Summaries:
 {combined_summary}
 
 ### RESPONSE
-Return only JSON, no extra text.
+Return a valid JSON list (e.g., [{{...}}, {{...}}]) only.
 """
+
+# -------------------------------
+# Utility: extract valid JSON
+# -------------------------------
+def extract_json(text: str):
+    # Remove markdown fences
+    text = text.strip()
+    text = re.sub(r"```(?:json)?", "", text).strip()
+
+    # Try to locate JSON array or object
+    start = text.find("[")
+    end = text.rfind("]")
+    if start != -1 and end != -1:
+        return text[start:end+1]
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1:
+        return "[" + text[start:end+1] + "]"  # normalize to list
+    return "[]"
 
 # -------------------------------
 # Endpoint
@@ -87,13 +108,13 @@ Return only JSON, no extra text.
 @app.post("/analyze_combined")
 def analyze_combined(request: CombinedRequest):
     combined_summary = ""
-    for check in request.all_checks:
-        combined_summary += f"- Table: {check.table_name}, Column: {check.column_name} ({check.column_desc})\n"
-        combined_summary += f"  Check Summary: {check.check_summary}\n\n"
+    for check in request.issues:
+        combined_summary += f"- Table: {check.table}, Column: {check.column} ({check.desc})\n"
+        combined_summary += f"  Check Summary: {check.summary}\n\n"
 
     prompt = PROMPT_TEMPLATE.format(
         schema=JSON_SCHEMA,
-        customer_id=request.customer_id,
+        sk_id=request.sk_id,
         combined_summary=combined_summary
     )
 
@@ -101,33 +122,39 @@ def analyze_combined(request: CombinedRequest):
     print(prompt)
     print("=========================================================\n")
 
+    raw_output = ""
+    parsed_json = []
+
     try:
         response = model.generate_content(prompt)
-        raw_output = response.text
+        raw_output = response.text.strip()
+
         print("\n================= RAW MODEL OUTPUT =================")
         print(raw_output)
         print("====================================================\n")
 
-        # Extract JSON
-        json_start = raw_output.find("{")
-        json_end = raw_output.rfind("}") + 1
-        suggestion_json = json.loads(raw_output[json_start:json_end])
+        clean_json_str = extract_json(raw_output)
+        parsed_json = json.loads(clean_json_str)
+
+        if isinstance(parsed_json, dict):  # normalize
+            parsed_json = [parsed_json]
+
     except Exception as e:
-        print(f"⚠️ Gemini parse failed: {e}")
-        suggestion_json = {
+        print(f"⚠️ Failed to parse JSON: {e}")
+        parsed_json = [{
             "dq_dimension": "Unknown",
             "suggestion": "Abstain",
             "rule_template_sql": None,
             "severity": "low",
             "confidence": 0.0,
-            "rationale": "Failed to parse Gemini output",
+            "rationale": "Failed to parse model output",
             "anomaly_signature": None,
             "root_cause_hypothesis": None,
             "lineage_hypothesis": [],
             "follow_up_checks": []
-        }
+        }]
 
-    return suggestion_json
+    return {"raw_output": raw_output, "parsed_json": parsed_json}
 
 # -------------------------------
 # Entry point
