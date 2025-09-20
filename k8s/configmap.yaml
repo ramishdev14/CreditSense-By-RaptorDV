@@ -1,9 +1,16 @@
-# k8s/configmap.yaml
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: dq-config
   namespace: dq-ai
 data:
-  # Non-sensitive toggles or constants
-  APP_ENV: "prod"
+  SNOWFLAKE_ACCOUNT: "EPDPDVY-KV00809"
+  SNOWFLAKE_USER: "RAMISH96"
+  SNOWFLAKE_PASSWORD: "Ronaldo9696$$$$"
+  SNOWFLAKE_WAREHOUSE: "DQ_WH"
+  SNOWFLAKE_DATABASE: "DQ_DB"
+  SNOWFLAKE_SCHEMA: "DQ_SCHEMA"
+  OPENAI_KEY: "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"
+  HUGGING_FACE: "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"
+  GEMINI_API_KEY: "AIzaSyDTEXl1EzvDFrEgdfzTBu4xeBB7y3XQkwU"
+  LLM_API_URL: "http://llm-gemini:8001/analyze_combined"

@@ -1,4 +1,3 @@
-# k8s/llm-deploy.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -16,12 +15,10 @@ spec:
     spec:
       containers:
         - name: llm-gemini
-          image: your-registry/llm-gemini:latest
+          image: lmaofrankie96/llm-gemini:latest
           ports:
             - containerPort: 8001
           envFrom:
-            - secretRef:
-                name: dq-secrets
             - configMapRef:
                 name: dq-config
           readinessProbe:

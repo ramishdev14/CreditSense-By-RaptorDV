@@ -1,4 +1,3 @@
-# k8s/orchestrator-deploy.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -16,12 +15,10 @@ spec:
     spec:
       containers:
         - name: orchestrator-api
-          image: your-registry/orchestrator-api:latest
+          image: lmaofrankie96/orchestrator-api:latest
           ports:
             - containerPort: 8002
           envFrom:
-            - secretRef:
-                name: dq-secrets
             - configMapRef:
                 name: dq-config
           readinessProbe:

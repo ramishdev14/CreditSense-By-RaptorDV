@@ -2,10 +2,9 @@ import streamlit as st
 import pandas as pd
 import snowflake.connector
 import os
+import requests
 from dotenv import load_dotenv
 
-# Import orchestrator function
-from orchestrate import process_customer
 # Import formatter for business-friendly display
 from formatter import display_ai_suggestion
 
@@ -13,6 +12,10 @@ from formatter import display_ai_suggestion
 # Load env vars & connect to Snowflake
 # -------------------------------
 load_dotenv("variables.env")
+
+ORCHESTRATOR_API_URL = os.getenv(
+    "ORCHESTRATOR_API_URL", "http://orchestrator-api:8002"
+)
 
 conn = snowflake.connector.connect(
     user=os.getenv("SNOWFLAKE_USER"),
@@ -39,8 +42,13 @@ if st.button("Process Results"):
     else:
         try:
             with st.spinner("⏳ Processing customer data and fetching AI suggestions..."):
-                # Run orchestration (now refreshes old results)
-                process_customer(int(customer_id))
+                # ✅ Call orchestrator-api instead of local process_customer
+                resp = requests.post(
+                    f"{ORCHESTRATOR_API_URL}/process_customer",
+                    json={"sk_id": int(customer_id)},
+                )
+                resp.raise_for_status()
+                result = resp.json()
 
                 # Fetch anomalies
                 anomalies_query = f"""
@@ -65,7 +73,9 @@ if st.button("Process Results"):
             # -------------------------------
             # Refresh Banner
             # -------------------------------
-            st.success(f"✅ Processing complete! Old results for Customer {customer_id} were refreshed.")
+            st.success(
+                f"✅ Processing complete! Results for Customer {customer_id} were refreshed."
+            )
 
             # -------------------------------
             # Summary Banner (Business Snapshot)

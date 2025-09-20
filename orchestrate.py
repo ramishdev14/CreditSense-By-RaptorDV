@@ -9,7 +9,10 @@ from dotenv import load_dotenv
 # Load env vars
 # -------------------------------
 load_dotenv("variables.env")
-LLM_API_URL = os.getenv("LLM_API_URL")
+LLM_API_URL = os.getenv(
+    "LLM_API_URL",
+    "http://llm-gemini:8001/analyze_combined"  # ✅ safe default
+)
 
 # -------------------------------
 # Connect to Snowflake
@@ -49,7 +52,7 @@ def fetch_customer_data(sk_id):
 # Process one customer
 # -------------------------------
 def process_customer(sk_id: int):
-    # 🧹 Delete old anomalies & suggestions for this customer
+    # 🧹 Delete old anomalies & suggestions
     cur.execute("DELETE FROM DQ_ANOMALIES WHERE SK_ID_CURR = %s", (sk_id,))
     cur.execute("DELETE FROM DQ_AI_SUGGESTIONS WHERE SK_ID_CURR = %s", (sk_id,))
     conn.commit()
@@ -86,7 +89,6 @@ def process_customer(sk_id: int):
     # -------------------------------
     payload_checks = []
     for table_name, col, issue_type, severity, detail in all_checks:
-        # Column description
         cur.execute("""
             SELECT DESCRIPTION 
             FROM COLUMN_DICTIONARY 
@@ -95,7 +97,6 @@ def process_customer(sk_id: int):
         desc_row = cur.fetchone()
         column_desc = desc_row[0] if desc_row else "No description available"
 
-        # Insert anomaly
         anomaly_details = {"issue_type": issue_type, "detail": detail}
         cur.execute("""
             INSERT INTO DQ_ANOMALIES
@@ -107,7 +108,6 @@ def process_customer(sk_id: int):
         ))
         conn.commit()
 
-        # Add to payload
         payload_checks.append({
             "table": table_name,
             "column": col,
@@ -119,19 +119,21 @@ def process_customer(sk_id: int):
     # Send combined payload to LLM
     # -------------------------------
     payload = {"sk_id": int(sk_id), "issues": payload_checks}
-    print(f"\n📤 Sending combined payload for {sk_id}:\n{json.dumps(payload, indent=2)}\n")
+    print(f"\n📤 Sending to LLM API: {LLM_API_URL}")
+    print(f"Payload:\n{json.dumps(payload, indent=2)}\n")
 
     try:
         resp = requests.post(LLM_API_URL, json=payload)
+        print(f"📥 Response status: {resp.status_code}")
         resp.raise_for_status()
         llm = resp.json()
+        print(f"📥 Raw LLM response: {json.dumps(llm, indent=2)}")
 
         raw_output = llm.get("raw_output", "")
         suggestions = llm.get("parsed_json", [])
         if isinstance(suggestions, dict):
             suggestions = [suggestions]
 
-        # Insert each suggestion
         for suggestion in suggestions:
             cur.execute("""
                 INSERT INTO DQ_AI_SUGGESTIONS

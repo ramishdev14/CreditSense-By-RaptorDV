@@ -1,29 +1,36 @@
-version: "3.9"
+
 
 services:
   llm-gemini:
+    build:
+      context: .                # build context = repo root
+      dockerfile: docker/Dockerfile.llm
     image: lmaofrankie96/llm-gemini:latest
     ports:
       - "8001:8001"
     env_file:
-      - ./variables.env
+      - variables.env
 
   orchestrator-api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.orchestrator
     image: lmaofrankie96/orchestrator-api:latest
-    env_file:
-      - ./variables.env
-    environment:
-      - LLM_API_URL=http://llm-gemini:8001/analyze_combined
     ports:
-      - "8000:8000"
+      - "8002:8002"
+    env_file:
+      - variables.env
     depends_on:
       - llm-gemini
 
   dq-dashboard:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dashboard
     image: lmaofrankie96/dq-dashboard:latest
-    env_file:
-      - ./variables.env
     ports:
       - "8501:8501"
+    env_file:
+      - variables.env
     depends_on:
       - orchestrator-api

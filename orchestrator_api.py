@@ -1,10 +1,12 @@
 # orchestrator_api.py
-from fastapi import FastAPI, Query
+from fastapi import FastAPI
 from pydantic import BaseModel
-from typing import Optional
-from orchestrate import process_customer  # uses your existing function
+from orchestrate import process_customer  # reuse your existing function
 
 app = FastAPI(title="Orchestrator API")
+
+class ProcessRequest(BaseModel):
+    sk_id: int
 
 class ProcessResponse(BaseModel):
     status: str
@@ -15,6 +17,6 @@ def health():
     return {"status": "ok"}
 
 @app.post("/process_customer", response_model=ProcessResponse)
-def process(sk_id: int = Query(..., description="SK_ID_CURR to process")):
-    process_customer(sk_id)
-    return {"status": "processed", "sk_id": sk_id}
+def process(request: ProcessRequest):
+    process_customer(request.sk_id)
+    return {"status": "processed", "sk_id": request.sk_id}
