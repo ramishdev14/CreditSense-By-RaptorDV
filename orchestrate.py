@@ -45,6 +45,11 @@ def fetch_customer_data(sk_id):
 # Process one customer
 # -------------------------------
 def process_customer(sk_id: int):
+    # 🧹 Delete old anomalies & suggestions for this customer
+    cur.execute("DELETE FROM DQ_ANOMALIES WHERE SK_ID_CURR = %s", (sk_id,))
+    cur.execute("DELETE FROM DQ_AI_SUGGESTIONS WHERE SK_ID_CURR = %s", (sk_id,))
+    conn.commit()
+
     app_df, bureau_df = fetch_customer_data(sk_id)
     all_checks = []
 
@@ -126,13 +131,13 @@ def process_customer(sk_id: int):
         for suggestion in suggestions:
             cur.execute("""
                 INSERT INTO DQ_AI_SUGGESTIONS
-                (SK_ID_CURR, TABLE_NAME, COLUMN_NAME, ISSUE_DESCRIPTION, RAW_LLM_OUTPUT, AI_SUGGESTION, 
+                (TABLE_NAME, COLUMN_NAME, SK_ID_CURR, ISSUE_DESCRIPTION, RAW_LLM_OUTPUT, AI_SUGGESTION, 
                  CONFIDENCE_SCORE, ROOT_CAUSE_HYPOTHESIS, LINEAGE_HYPOTHESIS, TIMESTAMP)
                 SELECT %s, %s, %s, %s, %s, PARSE_JSON(%s), %s, %s, PARSE_JSON(%s), CURRENT_TIMESTAMP
             """, (
-                int(sk_id),
                 payload_checks[0]["table"],
                 payload_checks[0]["column"],
+                int(sk_id),
                 json.dumps(payload_checks),
                 raw_output,
                 json.dumps(suggestion),

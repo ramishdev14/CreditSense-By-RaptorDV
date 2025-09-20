@@ -6,6 +6,8 @@ from dotenv import load_dotenv
 
 # Import orchestrator function
 from orchestrate import process_customer
+# Import formatter for business-friendly display
+from formatter import display_ai_suggestion
 
 # -------------------------------
 # Load env vars & connect to Snowflake
@@ -37,7 +39,7 @@ if st.button("Process Results"):
     else:
         try:
             with st.spinner("⏳ Processing customer data and fetching AI suggestions..."):
-                # Run orchestration
+                # Run orchestration (now refreshes old results)
                 process_customer(int(customer_id))
 
                 # Fetch anomalies
@@ -50,7 +52,7 @@ if st.button("Process Results"):
                 """
                 anomalies_df = pd.read_sql(anomalies_query, conn)
 
-                # Fetch AI suggestions (now filtered by SK_ID_CURR directly)
+                # Fetch AI suggestions
                 suggestions_query = f"""
                     SELECT *
                     FROM DQ_AI_SUGGESTIONS
@@ -60,19 +62,54 @@ if st.button("Process Results"):
                 """
                 suggestions_df = pd.read_sql(suggestions_query, conn)
 
-            # Show results after processing
-            st.success("✅ Processing complete!")
+            # -------------------------------
+            # Refresh Banner
+            # -------------------------------
+            st.success(f"✅ Processing complete! Old results for Customer {customer_id} were refreshed.")
 
-            st.subheader("Detected Anomalies")
+            # -------------------------------
+            # Summary Banner (Business Snapshot)
+            # -------------------------------
+            if anomalies_df.empty:
+                st.info(f"✅ No anomalies detected for customer {customer_id}.")
+            else:
+                total_anomalies = len(anomalies_df)
+                high_count = sum(
+                    1 for x in anomalies_df["ANOMALY_DETAILS"].astype(str).values if "High" in x
+                )
+                med_count = sum(
+                    1 for x in anomalies_df["ANOMALY_DETAILS"].astype(str).values if "Medium" in x
+                )
+                low_count = total_anomalies - high_count - med_count
+
+                st.markdown(
+                    f"""
+                    ### 🚨 Customer {customer_id} Summary
+                    - **Total anomalies:** {total_anomalies}  
+                    - 🔴 High severity: **{high_count}**  
+                    - 🟠 Medium severity: **{med_count}**  
+                    - 🟢 Low severity: **{low_count}**
+                    """
+                )
+
+            # -------------------------------
+            # Detailed Results
+            # -------------------------------
+            st.subheader("Detected Anomalies (Raw View)")
             if anomalies_df.empty:
                 st.info("No anomalies found for this customer.")
             else:
                 st.dataframe(anomalies_df, width=1200)
 
-            st.subheader("AI Suggestions")
+            st.subheader("AI Suggestions (Business-Friendly View)")
             if suggestions_df.empty:
                 st.info("No AI suggestions available for this customer.")
             else:
+                for _, row in suggestions_df.iterrows():
+                    display_ai_suggestion(row)
+                    st.divider()
+
+            with st.expander("🔍 Show Raw AI Suggestions Table"):
                 st.dataframe(suggestions_df, width=1200)
 
         except Exception as e:
