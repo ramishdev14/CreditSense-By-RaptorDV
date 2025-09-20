@@ -1,0 +1,40 @@
+# k8s/services.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-gemini
+  namespace: dq-ai
+spec:
+  selector:
+    app: llm-gemini
+  ports:
+    - port: 8001
+      targetPort: 8001
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orchestrator-api
+  namespace: dq-ai
+spec:
+  selector:
+    app: orchestrator-api
+  ports:
+    - port: 8002
+      targetPort: 8002
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dq-dashboard
+  namespace: dq-ai
+spec:
+  selector:
+    app: dq-dashboard
+  ports:
+    - port: 80
+      targetPort: 8501
+      protocol: TCP
+  type: LoadBalancer  # or NodePort if you don’t have a LB

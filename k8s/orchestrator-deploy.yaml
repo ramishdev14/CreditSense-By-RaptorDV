@@ -1,0 +1,32 @@
+# k8s/orchestrator-deploy.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestrator-api
+  namespace: dq-ai
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: orchestrator-api
+  template:
+    metadata:
+      labels:
+        app: orchestrator-api
+    spec:
+      containers:
+        - name: orchestrator-api
+          image: your-registry/orchestrator-api:latest
+          ports:
+            - containerPort: 8002
+          envFrom:
+            - secretRef:
+                name: dq-secrets
+            - configMapRef:
+                name: dq-config
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8002
+            initialDelaySeconds: 3
+            periodSeconds: 5

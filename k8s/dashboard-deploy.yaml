@@ -1,0 +1,38 @@
+# k8s/dashboard-deploy.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dq-dashboard
+  namespace: dq-ai
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dq-dashboard
+  template:
+    metadata:
+      labels:
+        app: dq-dashboard
+    spec:
+      containers:
+        - name: dq-dashboard
+          image: your-registry/dq-dashboard:latest
+          ports:
+            - containerPort: 8501
+          envFrom:
+            - secretRef:
+                name: dq-secrets
+            - configMapRef:
+                name: dq-config
+          env:
+            # So the dashboard knows how to reach services inside the cluster:
+            - name: ORCHESTRATOR_API_URL
+              value: "http://orchestrator-api:8002"
+            - name: LLM_API_URL
+              value: "http://llm-gemini:8001"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8501
+            initialDelaySeconds: 5
+            periodSeconds: 5

@@ -1,0 +1,32 @@
+# k8s/llm-deploy.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-gemini
+  namespace: dq-ai
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llm-gemini
+  template:
+    metadata:
+      labels:
+        app: llm-gemini
+    spec:
+      containers:
+        - name: llm-gemini
+          image: your-registry/llm-gemini:latest
+          ports:
+            - containerPort: 8001
+          envFrom:
+            - secretRef:
+                name: dq-secrets
+            - configMapRef:
+                name: dq-config
+          readinessProbe:
+            httpGet:
+              path: /docs
+              port: 8001
+            initialDelaySeconds: 3
+            periodSeconds: 5

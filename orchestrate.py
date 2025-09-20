@@ -6,10 +6,14 @@ import pandas as pd
 from dotenv import load_dotenv
 
 # -------------------------------
-# Load env vars & connect to Snowflake
+# Load env vars
 # -------------------------------
 load_dotenv("variables.env")
+LLM_API_URL = os.getenv("LLM_API_URL")
 
+# -------------------------------
+# Connect to Snowflake
+# -------------------------------
 conn = snowflake.connector.connect(
     user=os.getenv("SNOWFLAKE_USER"),
     password=os.getenv("SNOWFLAKE_PASSWORD"),
@@ -118,7 +122,7 @@ def process_customer(sk_id: int):
     print(f"\n📤 Sending combined payload for {sk_id}:\n{json.dumps(payload, indent=2)}\n")
 
     try:
-        resp = requests.post("http://127.0.0.1:8001/analyze_combined", json=payload)
+        resp = requests.post(LLM_API_URL, json=payload)
         resp.raise_for_status()
         llm = resp.json()
 
