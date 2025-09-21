@@ -9,8 +9,8 @@ It detects anomalies in customer credit data, leverages LLMs for root cause anal
 
 ## 🌍 Live Demo
 
-🔗 **Public Dashboard URL**: [http://<YOUR-EXTERNAL-IP>](http://<YOUR-EXTERNAL-IP>)  
-*(Replace `<YOUR-EXTERNAL-IP>` with the actual LoadBalancer URL from `kubectl get svc dq-dashboard -n dq-ai`)*
+🔗 **Public Dashboard URL**: [https://teams.microsoft.com/l/message/19:75cb0a2d-ce90-45f9-9676-063a1a5db1e8_fe69d683-521c-4484-ae3d-cb5ef33c0c5b@unq.gbl.spaces/1758420068148?context=%7B%22contextType%22%3A%22chat%22%7D] 
+
 
 ---
 
