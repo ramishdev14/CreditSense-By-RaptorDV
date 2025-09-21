@@ -9,31 +9,182 @@ It detects anomalies in customer credit data, leverages LLMs for root cause anal
 
 ## 🌍 Live Demo
 
-🔗 **Public Dashboard URL**: [https://teams.microsoft.com/l/message/19:75cb0a2d-ce90-45f9-9676-063a1a5db1e8_fe69d683-521c-4484-ae3d-cb5ef33c0c5b@unq.gbl.spaces/1758420068148?context=%7B%22contextType%22%3A%22chat%22%7D] 
-
+🔗 **Public Dashboard URL**: [https://<your-public-loadbalancer-url>](https://<your-public-loadbalancer-url>)  
+*(Replace this with the actual LoadBalancer URL from `kubectl get svc dq-dashboard -n dq-ai`)*
 
 ---
 
 ## 📊 What It Does
 
-- **Anomaly Detection**  
-  - Checks for missing values, negatives, duplicates, and outliers in customer credit data.
-  - Stores anomalies in **Snowflake**.
+### ✅ Anomaly Detection
+The system automatically checks customer credit data for:
+- **Missing Values** – Completeness checks
+- **Negative Values** – Validity checks (e.g., negative income or credit)
+- **Duplicates** – Uniqueness checks
+- **Outliers** – Consistency checks (e.g., unusual amounts)
 
-- **AI Suggestions (LLM Integration)**  
-  - Uses **Google Gemini** to generate structured root cause hypotheses and data lineage mappings.
-  - Stores AI suggestions in Snowflake for traceability.
+These anomalies are logged into **Snowflake tables** for auditability.
 
-- **Interactive Dashboard (Streamlit)**  
-  - Enter a `Customer ID` to analyze results.
-  - View anomalies and AI suggestions with clear **business-friendly formatting**.
-  - Get a **business impact summary** and insights directly from the data.
-  - Explore raw tables (hidden inside expanders).
+---
 
-- **Dataset Used**  
-  - Sample credit risk data based on **Home Credit Dataset** (SAMPLE_APPLICATION, SAMPLE_BUREAU, etc.) preloaded in Snowflake.
+### 💡 AI Suggestions with Gemini
+Detected anomalies are packaged and sent to the **LLM Service (Google Gemini)**.  
+Gemini generates:
+- **Fix suggestions** → Short, actionable recommendations.
+- **Rule templates** → SQL or pseudocode for validation rules.
+- **Root cause hypotheses** → Why the anomaly might exist.
+- **Data lineage insights** → Relationships between affected tables.
+
+The results are stored in **Snowflake**, making them queryable and traceable.
+
+---
+
+### 📊 Interactive Dashboard (Streamlit)
+The business-facing **Streamlit Dashboard** provides:
+- Input for **Customer ID**  
+- **Summary banners** showing anomaly counts and severity  
+- **AI-powered business-friendly suggestions**  
+- **Business impact section** highlighting how data quality affects decision-making  
+- Expandable **raw tables** for anomalies and AI suggestions (for technical users)
+
+This ensures both **business stakeholders** and **data engineers** get value from the system.
+
+---
+
+### 📂 Dataset
+We used a **sample subset of the Home Credit Dataset** (a well-known credit risk dataset), stored in Snowflake:
+- **SAMPLE_APPLICATION**
+- **SAMPLE_BUREAU**
+- **SAMPLE_PREVIOUS_APP**
+- **SAMPLE_INSTALLMENTS**
+
+This mirrors real-world financial data quality monitoring needs.
 
 ---
 
 ## 🏗️ System Architecture
 
+### 📸 Architecture Diagram
+![System Architecture](./docs/architecture.png)  
+*(Replace the path with your actual image path in repo)*
+
+---
+
+### 🔍 Architecture Explanation
+
+1. **Frontend – Streamlit Dashboard**
+   - Exposed to end-users through a **Kubernetes LoadBalancer**.
+   - Lets business users enter a **Customer ID** and view results.
+   - Communicates with the **Orchestrator API** to trigger anomaly checks and fetch suggestions.
+   - Provides **visualizations** like summaries, business impact insights, and expandable raw data.
+
+---
+
+2. **Backend Services**
+   - **Orchestrator API (FastAPI)**
+     - Orchestrates the full pipeline when a user inputs a Customer ID.
+     - Fetches raw data from Snowflake.
+     - Runs anomaly checks (missing %, negatives, duplicates, outliers).
+     - Calls the **LLM Service** with a combined summary of issues.
+     - Stores anomalies + AI suggestions back into Snowflake.
+     - Exposes endpoints `/process_customer` and `/healthz`.
+
+   - **LLM Service – Gemini (FastAPI)**
+     - Exposes `/analyze_combined` endpoint.
+     - Uses **Google Gemini** model via `google.generativeai` SDK.
+     - Ensures structured JSON outputs using strict schema parsing.
+     - Extracts root cause, lineage, and actionable suggestions.
+
+---
+
+3. **Data Platform – Snowflake**
+   - Stores:
+     - **Raw Data** (SAMPLE_APPLICATION, SAMPLE_BUREAU, etc.)
+     - **Anomalies** (`DQ_ANOMALIES`)
+     - **AI Suggestions** (`DQ_AI_SUGGESTIONS`)
+   - Provides SQL access for both anomaly detection logic and dashboard queries.
+   - Serves as the **single source of truth**.
+
+---
+
+4. **Cloud Infrastructure – AWS**
+   - **Amazon EKS (Elastic Kubernetes Service)**  
+     - Runs the containerized workloads (dashboard, orchestrator, LLM API).
+     - Provides scalability and high availability.
+
+   - **Amazon ECR (Elastic Container Registry)**  
+     - Stores Docker images (`dq-dashboard`, `orchestrator-api`, `llm-gemini`).
+     - Integrated with EKS deployments.
+
+   - **Kubernetes (Manifests in `k8s/`)**
+     - **Deployments** → Manage pod lifecycles for each service.
+     - **Services** → Internal communication (ClusterIP for APIs) + LoadBalancer for dashboard.
+     - **ConfigMaps & Secrets** → Manage Snowflake credentials and API keys securely.
+     - **Namespace `dq-ai`** → Keeps resources organized.
+
+---
+
+### 🔁 Flow of Events
+
+1. User enters **Customer ID** in dashboard.  
+2. Dashboard calls **Orchestrator API → /process_customer**.  
+3. Orchestrator fetches raw data from Snowflake.  
+4. Orchestrator runs anomaly detection rules.  
+5. Orchestrator sends combined issues → **LLM Service**.  
+6. LLM Service (Gemini) generates AI suggestions and lineage.  
+7. Orchestrator stores anomalies + suggestions into Snowflake.  
+8. Dashboard fetches results and visualizes them for the user.  
+9. Business user sees **both raw data and business-friendly insights**.
+
+---
+
+## ⚙️ Tools & Technologies
+
+- **Frontend**
+  - Streamlit → UI
+  - Plotly → Visualization
+
+- **Backend**
+  - FastAPI → APIs
+  - Python (Pandas, Requests) → Data processing
+  - Snowflake Python Connector → DB access
+  - Google Gemini API → LLM integration
+
+- **Data Platform**
+  - Snowflake → Data storage & query engine
+
+- **Infrastructure**
+  - Docker → Containerization
+  - Docker Compose → Local orchestration
+  - Kubernetes → Pod & service orchestration
+  - AWS EKS → Managed Kubernetes cluster
+  - AWS ECR → Container registry
+  - LoadBalancer Service → External dashboard access
+
+---
+
+## 🧑‍💻 Example Customer IDs
+
+For testing the dashboard:
+
+103065, 108032, 111950, 112961, 121072, 103788
+
+
+---
+
+## 💡 Business Impact
+
+CreditSense helps financial institutions:
+- Detect and remediate **data quality issues** early.
+- Use AI to **prioritize fixes** by severity and business context.
+- Gain **data lineage insights** for root cause analysis.
+- Improve **compliance** and reduce risk in decision-making.
+
+---
+
+## 🛠️ Local Development
+
+Run everything locally using Docker Compose:
+
+```bash
+docker compose up --build
