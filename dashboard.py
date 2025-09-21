@@ -3,6 +3,7 @@ import pandas as pd
 import snowflake.connector
 import os
 import requests
+import json
 from dotenv import load_dotenv
 
 # Import formatter for business-friendly display
@@ -30,7 +31,6 @@ conn = snowflake.connector.connect(
 # Streamlit Dashboard
 # -------------------------------
 st.set_page_config(page_title="DQ Dashboard", layout="wide")
-
 st.title("📊 Data Quality Monitoring Dashboard")
 
 # Customer input
@@ -42,13 +42,12 @@ if st.button("Process Results"):
     else:
         try:
             with st.spinner("⏳ Processing customer data and fetching AI suggestions..."):
-                # ✅ Call orchestrator-api instead of local process_customer
+                # ✅ Call orchestrator-api
                 resp = requests.post(
                     f"{ORCHESTRATOR_API_URL}/process_customer",
                     json={"sk_id": int(customer_id)},
                 )
                 resp.raise_for_status()
-                result = resp.json()
 
                 # Fetch anomalies
                 anomalies_query = f"""
@@ -56,7 +55,7 @@ if st.button("Process Results"):
                     FROM DQ_ANOMALIES
                     WHERE SK_ID_CURR = {customer_id}
                     ORDER BY TIMESTAMP DESC
-                    LIMIT 10
+                    LIMIT 50
                 """
                 anomalies_df = pd.read_sql(anomalies_query, conn)
 
@@ -78,7 +77,7 @@ if st.button("Process Results"):
             )
 
             # -------------------------------
-            # Summary Banner (Business Snapshot)
+            # Business Snapshot
             # -------------------------------
             if anomalies_df.empty:
                 st.info(f"✅ No anomalies detected for customer {customer_id}.")
@@ -102,15 +101,54 @@ if st.button("Process Results"):
                     """
                 )
 
-            # -------------------------------
-            # Detailed Results
-            # -------------------------------
-            st.subheader("Detected Anomalies (Raw View)")
-            if anomalies_df.empty:
-                st.info("No anomalies found for this customer.")
-            else:
-                st.dataframe(anomalies_df, width=1200)
+                # Show 3 latest AI suggestions (business-friendly)
+                if not suggestions_df.empty:
+                    st.markdown("### 💡 Latest AI Suggestions")
+                    for _, row in suggestions_df.head(3).iterrows():
+                        try:
+                            suggestion = json.loads(row["AI_SUGGESTION"])
+                            sev = suggestion.get("severity", "low").lower()
+                            icon = "🔴" if sev == "high" else ("🟠" if sev == "medium" else "🟢")
+                            st.markdown(f"- {icon} **{suggestion.get('suggestion', 'No suggestion')}**")
+                        except Exception:
+                            st.markdown("- (Could not parse suggestion)")
 
+            # -------------------------------
+            # Business Impact Section
+            # -------------------------------
+            st.subheader("📈 Business Impact Assessment")
+            if suggestions_df.empty:
+                st.info("No AI-based business impact assessment available.")
+            else:
+                latest = None
+                try:
+                    latest = json.loads(suggestions_df.iloc[0]["AI_SUGGESTION"])
+                except Exception:
+                    pass
+
+                if latest:
+                    severity = latest.get("severity", "Unknown").capitalize()
+                    root_cause = latest.get("root_cause_hypothesis", "No root cause identified")
+                    action = latest.get("suggestion", "No actionable recommendation")
+
+                    # 🔴🟠🟢 severity badge
+                    severity_icon = "🔴" if severity.lower() == "high" else (
+                        "🟠" if severity.lower() == "medium" else "🟢"
+                    )
+
+                    st.markdown(
+                        f"""
+                        - **Overall Data Risk Level:** {severity_icon} {severity}  
+                        - **Likely Root Cause:** {root_cause}  
+                        - **Recommended Action:** {action}
+                        """
+                    )
+                else:
+                    st.info("Could not parse latest AI suggestion for business impact.")
+
+            # -------------------------------
+            # AI Suggestions (Detailed)
+            # -------------------------------
             st.subheader("AI Suggestions (Business-Friendly View)")
             if suggestions_df.empty:
                 st.info("No AI suggestions available for this customer.")
@@ -119,7 +157,13 @@ if st.button("Process Results"):
                     display_ai_suggestion(row)
                     st.divider()
 
-            with st.expander("🔍 Show Raw AI Suggestions Table"):
+            # -------------------------------
+            # Raw Tables (Hidden in Expanders)
+            # -------------------------------
+            with st.expander("📋 Show Raw Anomalies Table"):
+                st.dataframe(anomalies_df, width=1200)
+
+            with st.expander("📋 Show Raw AI Suggestions Table"):
                 st.dataframe(suggestions_df, width=1200)
 
         except Exception as e:
