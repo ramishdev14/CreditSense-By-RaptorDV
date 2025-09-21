@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: dq-dashboard
-          image: lmaofrankie96/dq-dashboard:latest
+          image: 757185909927.dkr.ecr.us-east-1.amazonaws.com/dq-dashboard:latest
           ports:
             - containerPort: 8501
           envFrom:

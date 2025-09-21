@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: llm-gemini
-          image: lmaofrankie96/llm-gemini:latest
+          image: 757185909927.dkr.ecr.us-east-1.amazonaws.com/llm-gemini:latest
           ports:
             - containerPort: 8001
           envFrom:

@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: orchestrator-api
-          image: lmaofrankie96/orchestrator-api:latest
+          image: 757185909927.dkr.ecr.us-east-1.amazonaws.com/orchestrator-api:latest
           ports:
             - containerPort: 8002
           envFrom:
