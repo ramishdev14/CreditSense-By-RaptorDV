@@ -9,8 +9,8 @@ It detects anomalies in customer credit data, leverages LLMs for root cause anal
 
 ## 🌍 Live Demo
 
-🔗 **Public Dashboard URL**: [https://<your-public-loadbalancer-url>](https://<your-public-loadbalancer-url>)  
-*(Replace this with the actual LoadBalancer URL from `kubectl get svc dq-dashboard -n dq-ai`)*
+🔗 **Public Dashboard URL**: [CreditSense](http://ad51e1c09300e4e78a894f0d40ecd2d2-1190404559.us-east-1.elb.amazonaws.com/)  
+
 
 ---
 
@@ -65,8 +65,8 @@ This mirrors real-world financial data quality monitoring needs.
 ## 🏗️ System Architecture
 
 ### 📸 Architecture Diagram
-![System Architecture](./docs/architecture.png)  
-*(Replace the path with your actual image path in repo)*
+![System Architecture](./architecture.png)  
+
 
 ---
 
@@ -142,7 +142,6 @@ This mirrors real-world financial data quality monitoring needs.
 
 - **Frontend**
   - Streamlit → UI
-  - Plotly → Visualization
 
 - **Backend**
   - FastAPI → APIs
@@ -182,9 +181,3 @@ CreditSense helps financial institutions:
 
 ---
 
-## 🛠️ Local Development
-
-Run everything locally using Docker Compose:
-
-```bash
-docker compose up --build
