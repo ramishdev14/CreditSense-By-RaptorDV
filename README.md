@@ -1,6 +1,6 @@
 # 💳 CreditSense – AI-Powered Data Quality Monitoring
 
-**CreditSense** is an AI-driven **data quality monitoring platform** designed for the financial domain.  
+**CreditSense** is an AI-driven **data quality monitoring tool* designed for the financial domain.  
 It detects anomalies in customer credit data, leverages LLMs for root cause analysis, and generates actionable AI-powered suggestions for data stewards.
 
 🚀 Deployed on **AWS EKS**, it provides a scalable, cloud-native solution accessible via a web dashboard.
