@@ -7,13 +7,6 @@ It detects anomalies in customer credit data, leverages LLMs for root cause anal
 
 ---
 
-## 🌍 Live Demo
-
-🔗 **Public Dashboard URL**: [CreditSense](http://ad51e1c09300e4e78a894f0d40ecd2d2-1190404559.us-east-1.elb.amazonaws.com/)  
-
-
----
-
 ## 📊 What It Does
 
 ### ✅ Anomaly Detection
